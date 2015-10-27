@@ -1,0 +1,74 @@
+#!/bin/zsh
+#
+# su(1)-like script to gain AFS admin rights
+#
+# Present a su(1)-like interface to get and safely store
+# admin Kerberos credentials in the kernel keyring, and
+# switch to a new PAG with admin rights.
+#
+
+usage() {
+    cat >&2 <<END
+Usage: suafs [options]
+
+Options:
+  -c, --command COMMAND         pass COMMAND to the invoked shell
+  -h, --help                    display this help message and exit
+
+END
+}
+
+ARGS=$(getopt -o "c:h" -l "command:,help" -n suafs -- "$@")
+
+if [ $? -ne 0 ]; then
+    usage
+    exit 1
+fi
+
+eval set -- "$ARGS"
+
+while true; do
+    case $1 in
+        -c|--command)
+            shift
+            # This is why we use ZSH for this script...
+            # parameter expansion flags make complex quoting easy
+            shell_args="-c ${(q)1}"
+            shift
+            ;;
+        -h|--help)
+            shift
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+    esac
+done
+
+principal="${USER}/admin"
+
+if [ $UID -eq 0 ]; then
+    # When we're root, use the session keyring because different
+    # people can become root concurrently and they would share
+    # the user keyring, allowing them to steal 'admin' ticket
+    # caches that aren't theirs.  Unfortunately, session keyrings
+    # are not preserved across a new PAG, so we have to check and
+    # get Kerberos tickets inside the pagsh command.  On the plus
+    # side, the session keyring is automatically destroyed when
+    # the last process in the PAG ends, and no root user can access
+    # any other root user's keys.
+    export KRB5CCNAME="KEYRING:session:suafs"
+else
+    # When I am a regular user, I am less concerned about conflicts
+    # with other people using the same account, so I don't mind, and
+    # indeed, I prefer sharing the ticket cache across all of my
+    # sessions for the life of the ticket or until I log out
+    # completely.
+    export KRB5CCNAME="KEYRING:user:suafs"
+fi
+
+# DO IT!
+exec /usr/bin/pagsh -c "((/usr/bin/klist 2>&1 | grep -q ${principal}) || /usr/bin/kinit -l 1h ${principal}) && /usr/bin/aklog && exec ${SHELL} ${shell_args}"
